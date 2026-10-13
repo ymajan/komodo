@@ -145,9 +145,12 @@ volumes:
   # Postgres
   postgres-data:
     name: komodo-postgres-data
+    external: true
   # FerretDB
   ferretdb-state:
     name: komodo-ferretdb-state
+    external: true
   # Core / Periphery
   keys:
     name: komodo-keys
+    external: true

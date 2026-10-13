@@ -1,0 +1,153 @@
+###################################
+# 🦎 KOMODO COMPOSE - FERRETDB 🦎 #
+###################################
+
+## This compose file will deploy:
+##   1. Postgres + FerretDB Mongo adapter (https://www.ferretdb.com)
+##   2. Komodo Core
+##   3. Komodo Periphery
+
+name: komodo
+
+## Shared, bounded logging policy for every service in this file.
+## Maximum retained log history: approximately 100 MB per container
+## before compression (20 MB per file, up to 5 files).
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+    compress: "true"
+
+services:
+  postgres:
+    logging: *default-logging
+    # 🚨 Pin to a specific version. Updates can be breaking.
+    # https://github.com/FerretDB/documentdb/pkgs/container/postgres-documentdb
+    image: "${COMPOSE_KOMODO_POSTGRES_IMAGE:?Set COMPOSE_KOMODO_POSTGRES_IMAGE in .env}"
+    labels:
+      komodo.skip: # Prevent Komodo from stopping with StopAllContainers
+    restart: unless-stopped
+    networks:
+      - database
+    # ports:
+    #   - 5432:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: "${KOMODO_DATABASE_USERNAME:?Set KOMODO_DATABASE_USERNAME in .env}"
+      POSTGRES_PASSWORD: "${KOMODO_DATABASE_PASSWORD:?Set KOMODO_DATABASE_PASSWORD in .env}"
+      POSTGRES_DB: postgres
+    stop_grace_period: 1m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  ferretdb:
+    logging: *default-logging
+    # 🚨 Pin to a specific version. Updates can be breaking.
+    # https://github.com/FerretDB/FerretDB/pkgs/container/ferretdb
+    image: "${COMPOSE_KOMODO_FERRETDB_IMAGE:?Set COMPOSE_KOMODO_FERRETDB_IMAGE in .env}"
+    labels:
+      komodo.skip: # Prevent Komodo from stopping with StopAllContainers
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - database
+    # ports:
+    #   - 27017:27017
+    volumes:
+      - ferretdb-state:/state
+    environment:
+      FERRETDB_POSTGRESQL_URL: postgres://${KOMODO_DATABASE_USERNAME}:${KOMODO_DATABASE_PASSWORD}@postgres:5432/postgres
+
+  core:
+    logging: *default-logging
+    image: "${COMPOSE_KOMODO_CORE_IMAGE:?Set COMPOSE_KOMODO_CORE_IMAGE in .env}"
+    init: true
+    restart: unless-stopped
+    depends_on:
+      ferretdb:
+        condition: service_healthy
+    networks:
+      - database
+      - management
+      - caddy
+    ports: 
+      - 9120:9120
+      # - 127.0.0.1:9120:9120 TODO: replace with localhost-only after checking direct clients
+    ## env_file: ./compose.env removed after bootstrap
+    env_file: ./.env
+    environment:
+      KOMODO_DATABASE_ADDRESS: ferretdb:27017
+    labels:
+      caddy: "${COMPOSE_KOMODO_HOSTNAME:?Set COMPOSE_KOMODO_HOSTNAME in .env}"
+      caddy.reverse_proxy: "{{upstreams 9120}}"
+      caddy_ingress_network: caddy
+    volumes:
+      ## Attach the Core / Periphery communication keys
+      - keys:/config/keys
+      ## Store dated backups of the database - https://komo.do/docs/setup/backup
+      - "${COMPOSE_KOMODO_BACKUPS_PATH:?Set COMPOSE_KOMODO_BACKUPS_PATH in .env}:/backups"
+      ## Store sync files on server
+      # - /path/to/syncs:/syncs
+      ## Optionally mount a custom core.config.toml
+      # - /path/to/core.config.toml:/config/config.toml
+      ## Optionally mount custom root CA certificate to trust
+      # - /path/to/root_ca.crt:/usr/local/share/ca-certificates/root_ca.crt
+
+  ## Deploy the Periphery container using this block,
+  ## or deploy the Periphery binary with systemd using
+  ## https://github.com/moghtech/komodo/tree/main/scripts
+  periphery:
+    logging: *default-logging
+    image: "${COMPOSE_KOMODO_PERIPHERY_IMAGE:?Set COMPOSE_KOMODO_PERIPHERY_IMAGE in .env}"
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - core
+    ## env_file: ./compose.env removed after bootstrap
+    env_file: ./.env
+    networks:
+      - management
+    volumes:
+      ## Attach the Core / Periphery communication keys
+      - keys:/config/keys
+      ## Mount external Docker socket
+      - /var/run/docker.sock:/var/run/docker.sock
+      ## Allow Periphery to see processes outside of the container
+      - /proc:/proc
+      ## Specify the Periphery agent root directory.
+      ## All configs/repos must be children of this directory.
+      ## The path must be the same inside and outside the container.
+      ## Default: /etc/komodo
+      - ${PERIPHERY_ROOT_DIRECTORY:-/etc/komodo}:${PERIPHERY_ROOT_DIRECTORY:-/etc/komodo}
+      ## Optionally mount a custom periphery.config.toml
+      # - /path/to/periphery.config.toml:/config/config.toml
+      ## Optionally mount custom root CA certificate to trust
+      # - /path/to/root_ca.crt:/usr/local/share/ca-certificates/root_ca.crt
+
+networks:
+  database:
+    internal: true
+  management: {}
+  caddy:
+    external: true
+
+volumes:
+  # Postgres
+  postgres-data:
+    name: komodo-postgres-data
+  # FerretDB
+  ferretdb-state:
+    name: komodo-ferretdb-state
+  # Core / Periphery
+  keys:
+    name: komodo-keys
